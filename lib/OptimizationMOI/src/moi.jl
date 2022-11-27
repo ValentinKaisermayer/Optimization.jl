@@ -1,0 +1,452 @@
+mutable struct MOIOptimizationCache{F <: OptimizationFunction, uType, P, LB, UB, I, S, EX,
+                                    CEX, O} <: SciMLBase.AbstractOptimizationCache
+    f::F
+    u0::uType
+    p::P
+    lb::LB
+    ub::UB
+    int::I
+    sense::S
+    expr::EX
+    cons_expr::CEX
+    opt::O
+    solver_args::NamedTuple
+end
+
+function MOIOptimizationCache(prob::OptimizationProblem, opt; kwargs...)
+    isnothing(prob.f.sys) &&
+        throw(ArgumentError("Expected a `OptimizationProblem` that was setup via an `OptimizationSystem`, consider `modelingtoolkitize(prob).`"))
+
+    # TODO: check if the problem is at most bilinear, i.e. affine and or quadratic terms in two variables
+    expr_map = get_expr_map(prob.f.sys)
+    expr = convert_to_expr(MTK.subs_constants(MTK.objective(prob.f.sys)),
+                           prob.f.sys; expand_expr = true, expr_map)
+
+    cons = MTK.constraints(prob.f.sys)
+    cons_expr = Vector{Expr}(undef, length(cons))
+    Threads.@sync for i in eachindex(cons)
+        Threads.@spawn cons_expr[i] = convert_to_expr(Symbolics.canonical_form(MTK.subs_constants(cons[i])),
+                                                      prob.f.sys; expand_expr = true,
+                                                      expr_map)
+    end
+
+    return MOIOptimizationCache(prob.f,
+                                prob.u0,
+                                prob.p,
+                                prob.lb,
+                                prob.ub,
+                                prob.int,
+                                prob.sense,
+                                expr,
+                                cons_expr,
+                                opt,
+                                NamedTuple(kwargs))
+end
+
+SciMLBase.has_reinit(cache::MOIOptimizationCache) = true
+function SciMLBase.reinit!(cache::MOIOptimizationCache; p = nothing, u0 = nothing)
+    if !isnothing(p) && eltype(p) <: Pair || (!isnothing(u0) && eltype(u0) <: Pair)
+        defs = Dict{Any, Any}()
+        if hasproperty(cache.f, :sys)
+            if hasfield(typeof(cache.f.sys), :ps)
+                defs = mergedefaults(defs, cache.p, parameters(cache.f.sys))
+            end
+            if hasfield(typeof(cache.f.sys), :states)
+                defs = SciMLBase.mergedefaults(defs, cache.u0, states(cache.f.sys))
+            end
+        end
+    else
+        defs = nothing
+    end
+
+    if isnothing(p)
+        p = cache.p
+    else
+        if eltype(p) <: Pair
+            if hasproperty(cache.f, :sys) && hasfield(typeof(cache.f.sys), :ps)
+                p = varmap_to_vars(p, parameters(cache.f.sys);
+                                   defaults = defs)
+                defs = mergedefaults(defs, p, parameters(cache.f.sys))
+            else
+                throw(ArgumentError("This problem does not support symbolic parameter maps with `reinit!`, i.e. it does not have a symbolic origin. Please use `reinit!` with the `p` keyword argument as a vector of values, paying attention to parameter order."))
+            end
+        end
+    end
+
+    length(cache.p) == length(p) ||
+        error("Something went wrong! The new parameter vector does not match the old one.")
+    cache.p = p
+
+    if isnothing(u0)
+        u0 = cache.u0
+    else
+        if eltype(u0) <: Pair
+            if hasproperty(cache.f, :sys) && hasfield(typeof(cache.f.sys), :states)
+                u0 = varmap_to_vars(u0, states(cache.f.sys);
+                                    defaults = defs)
+                defs = mergedefaults(defs, u0, states(cache.f.sys))
+            else
+                throw(ArgumentError("This problem does not support symbolic state maps with `reinit!`, i.e. it does not have a symbolic origin. Please use `reinit!` with the `u0` keyword argument as a vector of values, paying attention to state order."))
+            end
+        end
+    end
+
+    length(cache.u0) == length(u0) ||
+        error("Something went wrong! The new state vector does not match the old one.")
+    cache.u0 = u0
+
+    return cache
+end
+
+struct MalformedExprException <: Exception
+    msg::String
+end
+function Base.showerror(io::IO, e::MalformedExprException)
+    print(io, "MalformedExprException: ", e.msg)
+end
+
+function _add_moi_variables!(opt_setup, cache::MOIOptimizationCache)
+    num_variables = length(cache.u0)
+    θ = MOI.add_variables(opt_setup, num_variables)
+    if cache.lb !== nothing
+        @assert eachindex(cache.lb) == Base.OneTo(num_variables)
+    end
+    if cache.ub !== nothing
+        @assert eachindex(cache.ub) == Base.OneTo(num_variables)
+    end
+
+    for i in 1:num_variables
+        if cache.lb !== nothing && cache.lb[i] > -Inf
+            MOI.add_constraint(opt_setup, θ[i], MOI.GreaterThan(Float64(cache.lb[i])))
+        end
+        if cache.ub !== nothing && cache.ub[i] < Inf
+            MOI.add_constraint(opt_setup, θ[i], MOI.LessThan(Float64(cache.ub[i])))
+        end
+        if cache.int !== nothing && cache.int[i]
+            if cache.lb !== nothing && cache.lb[i] == 0 && cache.ub !== nothing &&
+               cache.ub[i] == 1
+                MOI.add_constraint(opt_setup, θ[i], MOI.ZeroOne())
+            else
+                MOI.add_constraint(opt_setup, θ[i], MOI.Integer())
+            end
+        end
+    end
+
+    if MOI.supports(opt_setup, MOI.VariablePrimalStart(), MOI.VariableIndex)
+        @assert eachindex(cache.u0) == Base.OneTo(num_variables)
+        for i in 1:num_variables
+            MOI.set(opt_setup, MOI.VariablePrimalStart(), θ[i], Float64(cache.u0[i]))
+        end
+    end
+    return θ
+end
+
+function SciMLBase.__solve(cache::MOIOptimizationCache)
+    maxiters = Optimization._check_and_convert_maxiters(cache.solver_args.maxiters)
+    maxtime = Optimization._check_and_convert_maxtime(cache.solver_args.maxtime)
+    opt_setup = __map_optimizer_args(cache,
+                                     cache.opt;
+                                     abstol = cache.solver_args.abstol,
+                                     reltol = cache.solver_args.reltol,
+                                     maxiters = maxiters,
+                                     maxtime = maxtime,
+                                     cache.solver_args...)
+
+    θ = _add_moi_variables!(opt_setup, cache)
+    MOI.set(opt_setup,
+            MOI.ObjectiveSense(),
+            cache.sense === Optimization.MaxSense ? MOI.MAX_SENSE : MOI.MIN_SENSE)
+
+    if !isnothing(cache.cons_expr)
+        for cons_expr in cache.cons_expr
+            expr = _replace_parameter_indices!(repl_getindex!(deepcopy(cons_expr.args[2])), # f(x) == 0 or f(x) <= 0
+                                               cache.p)
+            fixpoint_simplify_and_expand!(expr)
+            func, c = try
+                get_moi_function(expr) # find: f(x) + c == 0 or f(x) + c <= 0
+            catch e
+                if e isa MalformedExprException
+                    rethrow(MalformedExprException("$expr"))
+                else
+                    rethrow(e)
+                end
+            end
+            if is_eq(cons_expr)
+                MOI.add_constraint(opt_setup, func, MOI.EqualTo(Float64(-c)))
+            elseif is_leq(cons_expr)
+                MOI.add_constraint(opt_setup, func, MOI.LessThan(Float64(-c)))
+            else
+                throw(MalformedExprException("$expr"))
+            end
+        end
+    end
+
+    # objective
+    expr = _replace_parameter_indices!(repl_getindex!(deepcopy(cache.expr)), cache.p)
+    fixpoint_simplify_and_expand!(expr)
+    func, c = try
+        get_moi_function(expr)
+    catch e
+        if e isa MalformedExprException
+            rethrow(MalformedExprException("$expr"))
+        else
+            rethrow(e)
+        end
+    end
+    MOI.set(opt_setup, MOI.ObjectiveFunction{typeof(func)}(), func)
+
+    MOI.optimize!(opt_setup)
+    if MOI.get(opt_setup, MOI.ResultCount()) >= 1
+        minimizer = MOI.get(opt_setup, MOI.VariablePrimal(), θ)
+        minimum = MOI.get(opt_setup, MOI.ObjectiveValue())
+        opt_ret = Symbol(string(MOI.get(opt_setup, MOI.TerminationStatus())))
+    else
+        minimizer = fill(NaN, length(θ))
+        minimum = NaN
+        opt_ret = :Default
+    end
+    return SciMLBase.build_solution(cache,
+                                    cache.opt,
+                                    minimizer,
+                                    minimum;
+                                    original = opt_setup,
+                                    retcode = opt_ret)
+end
+
+function get_moi_function(expr)
+    affine_terms = MOI.ScalarAffineTerm{Float64}[]
+    quadratic_terms = MOI.ScalarQuadraticTerm{Float64}[]
+    constant = Ref(0.0)
+    collect_moi_terms!(expr,
+                       affine_terms,
+                       quadratic_terms,
+                       constant)
+    func = if isempty(quadratic_terms)
+        MOI.ScalarAffineFunction(affine_terms, 0.0)
+    else
+        MOI.ScalarQuadraticFunction(quadratic_terms, affine_terms, 0.0)
+    end
+    return func, constant[]
+end
+
+simplify_and_expand!(expr::T) where {T} = expr
+simplify_and_expand!(expr::Rational) = Float64(expr)
+
+"""
+Simplify the given expression in-place. All computations on numbers are evaluated and simplified. 
+After successive application the resulting expression should only contain terms of the form `:(a * x[i])` or `:(a * x[i] * x[j])`.
+"""
+function simplify_and_expand!(expr::Expr) # looks awful but is actually much faster than Metatheory.jl
+    if expr.head == :call
+        @assert length(expr.args) == 3
+        if expr.args[1] == :(*) && expr.args[2] isa Number && expr.args[3] isa Number # a::Number * b::Number => a * b
+            return expr.args[2] * expr.args[3]
+        elseif expr.args[1] == :(+) && expr.args[2] isa Number && expr.args[3] isa Number # a::Number + b::Number => a + b
+            return expr.args[2] + expr.args[3]
+        elseif expr.args[1] == :(^) && expr.args[2] isa Number && expr.args[3] isa Number  # a::Number^b::Number => a^b
+            return expr.args[2]^expr.args[3]
+        elseif expr.args[1] == :(/) && expr.args[2] isa Number && expr.args[3] isa Number  # a::Number/b::Number => a/b
+            return expr.args[2] / expr.args[3]
+        elseif expr.args[1] == :(//) && expr.args[2] isa Number && expr.args[3] isa Number  # a::Number//b::Number => a/b
+            return expr.args[2] / expr.args[3]
+        elseif expr.args[1] == :(*) && expr.args[2] isa Number &&
+               expr.args[3].head == :call &&
+               expr.args[3].args[1] == :(*) && expr.args[3].args[2] isa Number # a::Number * (b::Number * c) => (a * b) * c
+            return Expr(:call, :*, expr.args[2] * expr.args[3].args[2],
+                        expr.args[3].args[3])
+        elseif expr.args[1] == :(*) && expr.args[2] isa Real && isone(expr.args[2]) # 1 * x => x
+            return expr.args[3]
+        elseif expr.args[1] == :(*) && isa(expr.args[3], Real) && isone(expr.args[3]) # x * 1 => x
+            return expr.args[2]
+        elseif expr.args[1] == :(*) && isa(expr.args[2], Real) && iszero(expr.args[2]) # 0 * x => 0 
+            return 0
+        elseif expr.args[1] == :(*) && isa(expr.args[3], Real) && iszero(expr.args[3]) # x * 0 => x
+            return 0
+        elseif expr.args[1] == :(+) && isa(expr.args[2], Real) && iszero(expr.args[2]) # 0 + x => x 
+            return expr.args[3]
+        elseif expr.args[1] == :(+) && isa(expr.args[3], Real) && iszero(expr.args[3]) # x + 0 => x 
+            return expr.args[2]
+        elseif expr.args[1] == :(/) && isa(expr.args[3], Real) && isone(expr.args[3]) # x / 1 => x
+            return expr.args[2]
+        elseif expr.args[1] == :// && isa(expr.args[3], Real) && isone(expr.args[3]) # x // 1 => x
+            return expr.args[2]
+        elseif expr.args[1] == :(^) && expr.args[3] == 2 # x^2 => x*x
+            return Expr(:call, :*, expr.args[2], expr.args[2])
+        elseif expr.args[1] == :(*) && isa(expr.args[3], Number) # x * a::Number => a * x
+            return Expr(:call, :*, expr.args[3], expr.args[2])
+        end
+    end
+    for i in 1:length(expr.args)
+        expr.args[i] = simplify_and_expand!(expr.args[i])
+    end
+    return expr
+end
+
+function fixpoint_simplify_and_expand!(expr; iter_max = 1000)
+    i = 1
+    while i < iter_max
+        expr_old = copy(expr)
+        expr = simplify_and_expand!(expr)
+        expr_old == expr && break
+        i += 1
+    end
+    return expr
+end
+
+function collect_moi_terms!(expr::Real, affine_terms, quadratic_terms, constant)
+    constant[] += expr
+end
+
+function collect_moi_terms!(expr::Expr, affine_terms, quadratic_terms, constant)
+    if expr.head == :call
+        length(expr.args) == 3 || throw(MalformedExprException("$expr"))
+        if expr.args[1] == :(+)
+            for i in 2:length(expr.args)
+                collect_moi_terms!(expr.args[i], affine_terms, quadratic_terms, constant)
+            end
+        elseif expr.args[1] == :(*)
+            if expr.args[2] isa Number
+                if expr.args[3].head == :call && expr.args[3].args[1] == :(*) # a::Number * (x[i] * x[j])
+                    x1 = _get_variable_index_from_expr(expr.args[3].args[2])
+                    x2 = _get_variable_index_from_expr(expr.args[3].args[3])
+                    factor = x1 == x2 ? 2.0 : 1.0
+                    push!(quadratic_terms,
+                          MOI.ScalarQuadraticTerm(factor * Float64(expr.args[2]),
+                                                  x1, x2))
+                elseif expr.args[3].head == :ref # a::Number * x[i] 
+                    push!(affine_terms,
+                          MOI.ScalarAffineTerm(Float64(expr.args[2]),
+                                               _get_variable_index_from_expr(expr.args[3])))
+                end
+            else
+                if expr.args[2].head == :call && expr.args[2].args[1] == :(*) &&
+                   expr.args[2].args[2] isa Number # (a::Number * x[i]) * x[j]
+                    x1 = _get_variable_index_from_expr(expr.args[2].args[3])
+                    x2 = _get_variable_index_from_expr(expr.args[3])
+                    factor = x1 == x2 ? 2.0 : 1.0
+                    push!(quadratic_terms,
+                          MOI.ScalarQuadraticTerm(factor * Float64(expr.args[2].args[2]),
+                                                  x1, x2))
+                else # x[i] * x[j]
+                    x1 = _get_variable_index_from_expr(expr.args[2])
+                    x2 = _get_variable_index_from_expr(expr.args[3])
+                    factor = x1 == x2 ? 2.0 : 1.0
+                    push!(quadratic_terms,
+                          MOI.ScalarQuadraticTerm(factor,
+                                                  x1, x2))
+                end
+            end
+        end
+    elseif expr.head == :ref # x[i]
+        expr.args[1] == :x || throw(MalformedExprException("$expr"))
+        push!(affine_terms, MOI.ScalarAffineTerm(1.0, MOI.VariableIndex(expr.args[2])))
+    end
+
+    return
+end
+
+function _get_variable_index_from_expr(expr::Expr)
+    _is_var_ref_expr(expr)
+    return MOI.VariableIndex(expr.args[2])
+end
+
+function _is_var_ref_expr(expr::Expr)
+    expr.head == :ref || throw(MalformedExprException("$expr")) # x[i]
+    expr.args[1] == :x || throw(MalformedExprException("$expr"))
+    return true
+end
+
+function is_eq(expr::Expr)
+    expr.head == :call || throw(MalformedExprException("$expr"))
+    expr.args[1] in [:(==), :(=)]
+end
+
+function is_leq(expr::Expr)
+    expr.head == :call || throw(MalformedExprException("$expr"))
+    expr.args[1] == :(<=)
+end
+
+##############################################################################################
+## TODO: remove if in ModelingToolkit
+"""
+    rep_pars_vals!(expr::T, expr_map)
+
+Replaces variable expressions of the form `:some_variable` or `:(getindex, :some_variable, j)` with 
+`x[i]` were `i` is the corresponding index in the state vector. Same for the parameters. The 
+variable/parameter pairs are provided via the `expr_map`.
+
+Expects only expressions where the variables and parameters are of the form `:some_variable` 
+or `:(getindex, :some_variable, j)` or :(some_variable[j]).
+"""
+rep_pars_vals!(expr::T, expr_map) where {T} = expr
+function rep_pars_vals!(expr::Symbol, expr_map)
+    for (f, n) in expr_map
+        isequal(f, expr) && return n
+    end
+    return expr
+end
+function rep_pars_vals!(expr::Expr, expr_map)
+    if (expr.head == :call && expr.args[1] == getindex) || (expr.head == :ref)
+        for (f, n) in expr_map
+            isequal(f, expr) && return n
+        end
+    end
+    Threads.@sync for i in eachindex(expr.args)
+        Threads.@spawn expr.args[i] = rep_pars_vals!(expr.args[i], expr_map)
+    end
+    return expr
+end
+
+"""
+    symbolify!(e)
+
+Ensures that a given expression is fully symbolic, e.g. no function calls.
+"""
+symbolify!(e) = e
+function symbolify!(e::Expr)
+    if !(e.args[1] isa Symbol)
+        e.args[1] = Symbol(e.args[1])
+    end
+    symbolify!.(e.args)
+    return e
+end
+
+"""
+    get_expr_map(sys)
+
+Make a map from every parameter and state of the given system to an expression indexing its position 
+in the state or parameter vector.
+"""
+function get_expr_map(sys)
+    dvs = ModelingToolkit.states(sys)
+    ps = ModelingToolkit.parameters(sys)
+    return vcat([ModelingToolkit.toexpr(_s) => Expr(:ref, :x, i)
+                 for (i, _s) in enumerate(dvs)],
+                [ModelingToolkit.toexpr(_p) => Expr(:ref, :p, i)
+                 for (i, _p) in enumerate(ps)])
+end
+
+"""
+    convert_to_expr(eq, sys; expand_expr = false, pairs_arr = expr_map(sys))
+
+Converts the given symbolic expression to a Julia `Expr` and replaces all symbols, i.e. states and 
+parameters with `x[i]` and `p[i]`.
+
+# Arguments:
+- `eq`: Expression to convert
+- `sys`: Reference to the system holding the parameters and states
+- `expand_expr=false`: If `true` the symbolic expression is expanded first.
+"""
+function convert_to_expr(eq, sys; expand_expr = false, expr_map = expr_map(sys))
+    if expand_expr
+        eq = try
+            Symbolics.expand(eq) # PolyForm sometimes errors
+        catch e
+            Symbolics.expand(eq)
+        end
+    end
+    expr = ModelingToolkit.toexpr(eq)
+    rep_pars_vals!(expr, expr_map)
+    symbolify!(expr)
+    return expr
+end
