@@ -161,7 +161,7 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
         for cons_expr in cache.cons_expr
             expr = _replace_parameter_indices!(repl_getindex!(deepcopy(cons_expr.args[2])), # f(x) == 0 or f(x) <= 0
                                                cache.p)
-            expr = fixpoint_simplify_and_expand!(expr; iter_max = length(Theta)^2)
+            expr = fixpoint_simplify_and_expand!(expr; iter_max = (length(cache.u0) + length(cache.p))^2)
             func, c = try
                 get_moi_function(expr) # find: f(x) + c == 0 or f(x) + c <= 0
             catch e
@@ -183,7 +183,7 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
 
     # objective
     expr = _replace_parameter_indices!(repl_getindex!(deepcopy(cache.expr)), cache.p)
-    expr = fixpoint_simplify_and_expand!(expr; iter_max = length(Theta)^2)
+    expr = fixpoint_simplify_and_expand!(expr; iter_max = (length(cache.u0) + length(cache.p))^2)
     func, c = try
         get_moi_function(expr)
     catch e
@@ -283,8 +283,9 @@ function simplify_and_expand!(expr::Expr) # looks awful but is actually much fas
 end
 
 function fixpoint_simplify_and_expand!(expr; iter_max = Inf)
-    i = 1
-    while i < iter_max # unsure that this returns
+    i = 0
+    iter_max >= 0 || throw(ArgumentError("Expected `iter_max` to be positive."))
+    while i <= iter_max # unsure that this returns
         expr_old = deepcopy(expr)
         expr = simplify_and_expand!(expr)
         expr_old == expr && break
