@@ -158,7 +158,7 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
             cache.sense === Optimization.MaxSense ? MOI.MAX_SENSE : MOI.MIN_SENSE)
 
     prob_dim = length(cache.u0) + (isnothing(cache.p) ? 0 : length(cache.p)) # estimate of the expression complexity
-        
+
     if !isnothing(cache.cons_expr)
         for cons_expr in cache.cons_expr
             expr = _replace_parameter_indices!(repl_getindex!(deepcopy(cons_expr.args[2])), # f(x) == 0 or f(x) <= 0
