@@ -15,18 +15,18 @@ end
 
 function MOIOptimizationCache(prob::OptimizationProblem, opt; kwargs...)
     isnothing(prob.f.sys) &&
-        throw(ArgumentError("Expected a `OptimizationProblem` that was setup via an `OptimizationSystem`, consider `modelingtoolkitize(prob).`"))
+        throw(ArgumentError("Expected an `OptimizationProblem` that was setup via an `OptimizationSystem`, consider `modelingtoolkitize(prob).`"))
 
     # TODO: check if the problem is at most bilinear, i.e. affine and or quadratic terms in two variables
     expr_map = get_expr_map(prob.f.sys)
     expr = convert_to_expr(MTK.subs_constants(MTK.objective(prob.f.sys)),
-                           prob.f.sys; expand_expr = true, expr_map)
+                           prob.f.sys; expand_expr = false, expr_map)
 
     cons = MTK.constraints(prob.f.sys)
     cons_expr = Vector{Expr}(undef, length(cons))
     Threads.@sync for i in eachindex(cons)
         Threads.@spawn cons_expr[i] = convert_to_expr(Symbolics.canonical_form(MTK.subs_constants(cons[i])),
-                                                      prob.f.sys; expand_expr = true,
+                                                      prob.f.sys; expand_expr = false,
                                                       expr_map)
     end
 
@@ -235,12 +235,14 @@ simplify_and_expand!(expr::T) where {T} = expr
 simplify_and_expand!(expr::Rational) = Float64(expr)
 
 """
-Simplify the given expression in-place. All computations on numbers are evaluated and simplified. 
+Simplify and expands the given expression. All computations on numbers are evaluated and simplified. 
 After successive application the resulting expression should only contain terms of the form `:(a * x[i])` or `:(a * x[i] * x[j])`.
+Also mutates the given expression in-place, however incorrectly!
 """
-function simplify_and_expand!(expr::Expr) # looks awful but is actually much faster than Metatheory.jl
-    if expr.head == :call
-        @assert length(expr.args) == 3
+function simplify_and_expand!(expr::Expr) # looks awful but this is actually much faster than `Metatheory.jl`
+    if expr.head == :call && all(isa.(expr.args[2:end], Number)) # func(a::Number...)
+        return eval(expr)
+    elseif expr.head == :call && length(expr.args) == 3
         if expr.args[1] == :(*) && expr.args[2] isa Number && expr.args[3] isa Number # a::Number * b::Number => a * b
             return expr.args[2] * expr.args[3]
         elseif expr.args[1] == :(+) && expr.args[2] isa Number && expr.args[3] isa Number # a::Number + b::Number => a + b
@@ -251,12 +253,23 @@ function simplify_and_expand!(expr::Expr) # looks awful but is actually much fas
             return expr.args[2] / expr.args[3]
         elseif expr.args[1] == :(//) && expr.args[2] isa Number && expr.args[3] isa Number  # a::Number//b::Number => a/b
             return expr.args[2] / expr.args[3]
-        elseif expr.args[1] == :(*) && expr.args[2] isa Number &&
-               expr.args[3].head == :call &&
-               expr.args[3].args[1] == :(*) && expr.args[3].args[2] isa Number # a::Number * (b::Number * c) => (a * b) * c
+        elseif expr.args[1] == :(*) && expr.args[2] isa Number && isa(expr.args[3], Expr) &&
+               expr.args[3].head == :call && expr.args[3].args[1] == :(*) &&
+               expr.args[3].args[2] isa Number # a::Number * (b::Number * c) => (a * b) * c
             return Expr(:call, :*, expr.args[2] * expr.args[3].args[2],
                         expr.args[3].args[3])
-        elseif expr.args[1] == :(*) && expr.args[2] isa Real && isone(expr.args[2]) # 1 * x => x
+        elseif expr.args[1] == :(+) && isa(expr.args[3], Expr) &&
+               isa(expr.args[2], Number) &&
+               expr.args[3].head == :call && expr.args[3].args[1] == :(+) &&
+               isa(expr.args[3].args[2], Number) # a::Number + (b::Number + x)  => (a+b) + x
+            return Expr(:call, :+, expr.args[2] + expr.args[3].args[2],
+                        expr.args[3].args[3])
+        elseif expr.args[1] == :(*) && isa(expr.args[3], Expr) &&
+               expr.args[3].head == :call && expr.args[3].args[1] == :(*) &&
+               isa(expr.args[3].args[2], Number) # x * (a::Number * y) => a * (x * y)
+            return Expr(:call, :*, expr.args[3].args[2],
+                        Expr(:call, :*, expr.args[2], expr.args[3].args[3]))
+        elseif expr.args[1] == :(*) && isa(expr.args[2], Real) && isone(expr.args[2]) # 1 * x => x
             return expr.args[3]
         elseif expr.args[1] == :(*) && isa(expr.args[3], Real) && isone(expr.args[3]) # x * 1 => x
             return expr.args[2]
@@ -272,10 +285,25 @@ function simplify_and_expand!(expr::Expr) # looks awful but is actually much fas
             return expr.args[2]
         elseif expr.args[1] == :// && isa(expr.args[3], Real) && isone(expr.args[3]) # x // 1 => x
             return expr.args[2]
-        elseif expr.args[1] == :(^) && expr.args[3] == 2 # x^2 => x*x
+        elseif expr.args[1] == :(^) && isa(expr.args[3], Int) && expr.args[3] == 2 # x^2 => x * x
             return Expr(:call, :*, expr.args[2], expr.args[2])
+        elseif expr.args[1] == :(^) && isa(expr.args[3], Int) && expr.args[3] > 2 # x^n => x * x^(n-1)
+            return Expr(:call, :*, expr.args[2],
+                        Expr(:call, :^, expr.args[2], expr.args[3] - 1))
         elseif expr.args[1] == :(*) && isa(expr.args[3], Number) # x * a::Number => a * x
             return Expr(:call, :*, expr.args[3], expr.args[2])
+        elseif expr.args[1] == :(+) && isa(expr.args[3], Number) # x + a::Number => a + x
+            return Expr(:call, :+, expr.args[3], expr.args[2])
+        elseif expr.args[1] == :(*) && isa(expr.args[3], Expr) &&
+               expr.args[3].head == :call && expr.args[3].args[1] == :(+) # (x * (y + z)) => ((x * y) + (x * z))
+            return Expr(:call, :+,
+                        Expr(:call, :*, expr.args[2], expr.args[3].args[2]),
+                        Expr(:call, :*, expr.args[2], expr.args[3].args[3]))
+        elseif expr.args[1] == :(*) && isa(expr.args[2], Expr) &&
+               expr.args[2].head == :call && expr.args[2].args[1] == :(+) # ((y + z) * x) => ((x * y) + (x * z))
+            return Expr(:call, :+,
+                        Expr(:call, :*, expr.args[3], expr.args[2].args[2]),
+                        Expr(:call, :*, expr.args[3], expr.args[2].args[3]))
         end
     end
     for i in 1:length(expr.args)
@@ -284,13 +312,17 @@ function simplify_and_expand!(expr::Expr) # looks awful but is actually much fas
     return expr
 end
 
+"""
+Simplifies the given expression until a fixed-point is reached and the expression no longer changes.
+Will not terminate if a cycle occurs!
+"""
 function fixpoint_simplify_and_expand!(expr; iter_max = Inf)
     i = 0
     iter_max >= 0 || throw(ArgumentError("Expected `iter_max` to be positive."))
-    while i <= iter_max # unsure that this returns
+    while i <= iter_max
         expr_old = deepcopy(expr)
         expr = simplify_and_expand!(expr)
-        expr_old == expr && break
+        expr_old == expr && break # might not return if a cycle is reached
         i += 1
     end
     return expr
