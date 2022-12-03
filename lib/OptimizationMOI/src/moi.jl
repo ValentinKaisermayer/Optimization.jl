@@ -267,10 +267,21 @@ function simplify_and_expand!(expr::Expr) # looks awful but this is actually muc
         elseif expr.args[1] == :// && isa(expr.args[3], Real) && isone(expr.args[3]) # x // 1 => x
             return expr.args[2]
         elseif expr.args[1] == :(^) && isa(expr.args[3], Int) && expr.args[3] == 2 # x^2 => x * x
-            return Expr(:call, :*, expr.args[2], expr.args[2])
+            if isa(expr.args[2], Expr) && expr.args[2].head == :call &&
+               expr.args[2].args[1] == :+ # (x + y)^2 => (x^2 + ((2 * (x * y)) + y^2))
+                return Expr(:call, :+,
+                            Expr(:call, :^, expr.args[2].args[2], 2),
+                            Expr(:call, :+,
+                                 Expr(:call, :*, 2,
+                                      Expr(:call, :*, expr.args[2].args[2],
+                                           expr.args[2].args[3])),
+                                 Expr(:call, :^, expr.args[2].args[3], 2)))
+            else
+                return Expr(:call, :*, expr.args[2], expr.args[2]) # x^2 => x * x
+            end
         elseif expr.args[1] == :(^) && isa(expr.args[3], Int) && expr.args[3] > 2 # x^n => x * x^(n-1)
-            return Expr(:call, :*, expr.args[2],
-                        Expr(:call, :^, expr.args[2], expr.args[3] - 1))
+            return Expr(:call, :*, Expr(:call, :^, expr.args[2], expr.args[3] - 1),
+                        expr.args[2])
         elseif expr.args[1] == :(*) && isa(expr.args[3], Number) # x * a::Number => a * x
             return Expr(:call, :*, expr.args[3], expr.args[2])
         elseif expr.args[1] == :(+) && isa(expr.args[3], Number) # x + a::Number => a + x
@@ -286,21 +297,26 @@ function simplify_and_expand!(expr::Expr) # looks awful but this is actually muc
                         Expr(:call, :*, expr.args[3], expr.args[2].args[2]),
                         Expr(:call, :*, expr.args[3], expr.args[2].args[3]))
         elseif expr.args[1] == :(*) && expr.args[2] isa Number && isa(expr.args[3], Expr) &&
-            expr.args[3].head == :call && expr.args[3].args[1] == :(*) &&
-            expr.args[3].args[2] isa Number # a::Number * (b::Number * c) => (a * b) * c
+               expr.args[3].head == :call && expr.args[3].args[1] == :(*) &&
+               expr.args[3].args[2] isa Number # a::Number * (b::Number * c) => (a * b) * c
             return Expr(:call, :*, expr.args[2] * expr.args[3].args[2],
                         expr.args[3].args[3])
         elseif expr.args[1] == :(+) && isa(expr.args[3], Expr) &&
-            isa(expr.args[2], Number) &&
-            expr.args[3].head == :call && expr.args[3].args[1] == :(+) &&
-            isa(expr.args[3].args[2], Number) # a::Number + (b::Number + x)  => (a+b) + x
+               isa(expr.args[2], Number) &&
+               expr.args[3].head == :call && expr.args[3].args[1] == :(+) &&
+               isa(expr.args[3].args[2], Number) # a::Number + (b::Number + x)  => (a+b) + x
             return Expr(:call, :+, expr.args[2] + expr.args[3].args[2],
                         expr.args[3].args[3])
         elseif expr.args[1] == :(*) && isa(expr.args[3], Expr) &&
-            expr.args[3].head == :call && expr.args[3].args[1] == :(*) &&
-            isa(expr.args[3].args[2], Number) # x * (a::Number * y) => a * (x * y)
+               expr.args[3].head == :call && expr.args[3].args[1] == :(*) &&
+               isa(expr.args[3].args[2], Number) # x * (a::Number * y) => a * (x * y)
             return Expr(:call, :*, expr.args[3].args[2],
-                        Expr(:call, :*, expr.args[2], expr.args[3].args[3]))   
+                        Expr(:call, :*, expr.args[2], expr.args[3].args[3]))
+        elseif expr.args[1] == :(*) && isa(expr.args[2], Expr) &&
+               expr.args[2].head == :call && expr.args[2].args[1] == :(*) &&
+               isa(expr.args[2].args[2], Number) # (a::Number * x) * y => a * (x * y)
+            return Expr(:call, :*, expr.args[2].args[2],
+                        Expr(:call, :*, expr.args[2].args[3], expr.args[3]))
         end
     elseif expr.head == :call && all(isa.(expr.args[2:end], Number)) # func(a::Number...)
         return eval(expr)
@@ -315,7 +331,7 @@ end
 Simplifies the given expression until a fixed-point is reached and the expression no longer changes.
 Will not terminate if a cycle occurs!
 """
-function fixpoint_simplify_and_expand!(expr; iter_max = typemax(Int)-1)
+function fixpoint_simplify_and_expand!(expr; iter_max = typemax(Int) - 1)
     i = 0
     iter_max >= 0 || throw(ArgumentError("Expected `iter_max` to be positive."))
     while i <= iter_max
