@@ -20,14 +20,15 @@ function MOIOptimizationCache(prob::OptimizationProblem, opt; kwargs...)
     # TODO: check if the problem is at most bilinear, i.e. affine and or quadratic terms in two variables
     expr_map = get_expr_map(prob.f.sys)
     expr = repl_getindex!(convert_to_expr(MTK.subs_constants(MTK.objective(prob.f.sys)),
-                           prob.f.sys; expand_expr = false, expr_map))
+                                          prob.f.sys; expand_expr = false, expr_map))
 
     cons = MTK.constraints(prob.f.sys)
     cons_expr = Vector{Expr}(undef, length(cons))
     Threads.@sync for i in eachindex(cons)
         Threads.@spawn cons_expr[i] = repl_getindex!(convert_to_expr(Symbolics.canonical_form(MTK.subs_constants(cons[i])),
-                                                      prob.f.sys; expand_expr = false,
-                                                      expr_map))
+                                                                     prob.f.sys;
+                                                                     expand_expr = false,
+                                                                     expr_map))
     end
 
     return MOIOptimizationCache(prob.f,
