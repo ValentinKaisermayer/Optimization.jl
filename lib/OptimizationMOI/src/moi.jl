@@ -19,15 +19,15 @@ function MOIOptimizationCache(prob::OptimizationProblem, opt; kwargs...)
 
     # TODO: check if the problem is at most bilinear, i.e. affine and or quadratic terms in two variables
     expr_map = get_expr_map(prob.f.sys)
-    expr = convert_to_expr(MTK.subs_constants(MTK.objective(prob.f.sys)),
-                           prob.f.sys; expand_expr = false, expr_map)
+    expr = repl_getindex!(convert_to_expr(MTK.subs_constants(MTK.objective(prob.f.sys)),
+                           prob.f.sys; expand_expr = false, expr_map))
 
     cons = MTK.constraints(prob.f.sys)
     cons_expr = Vector{Expr}(undef, length(cons))
     Threads.@sync for i in eachindex(cons)
-        Threads.@spawn cons_expr[i] = convert_to_expr(Symbolics.canonical_form(MTK.subs_constants(cons[i])),
+        Threads.@spawn cons_expr[i] = repl_getindex!(convert_to_expr(Symbolics.canonical_form(MTK.subs_constants(cons[i])),
                                                       prob.f.sys; expand_expr = false,
-                                                      expr_map)
+                                                      expr_map))
     end
 
     return MOIOptimizationCache(prob.f,
@@ -161,7 +161,7 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
 
     if !isnothing(cache.cons_expr)
         for cons_expr in cache.cons_expr
-            expr = _replace_parameter_indices!(repl_getindex!(deepcopy(cons_expr.args[2])), # f(x) == 0 or f(x) <= 0
+            expr = _replace_parameter_indices!(deepcopy(cons_expr.args[2]), # f(x) == 0 or f(x) <= 0
                                                cache.p)
             expr = fixpoint_simplify_and_expand!(expr; iter_max = prob_dim^2)
             func, c = try
@@ -184,7 +184,7 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
     end
 
     # objective
-    expr = _replace_parameter_indices!(repl_getindex!(deepcopy(cache.expr)), cache.p)
+    expr = _replace_parameter_indices!(deepcopy(cache.expr), cache.p)
     expr = fixpoint_simplify_and_expand!(expr; iter_max = prob_dim^2)
     func, c = try
         get_moi_function(expr)
@@ -201,11 +201,11 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
     if MOI.get(opt_setup, MOI.ResultCount()) >= 1
         minimizer = MOI.get(opt_setup, MOI.VariablePrimal(), Theta)
         minimum = MOI.get(opt_setup, MOI.ObjectiveValue())
-        opt_ret = Symbol(string(MOI.get(opt_setup, MOI.TerminationStatus())))
+        opt_ret = __moi_status_to_ReturnCode(MOI.get(opt_setup, MOI.TerminationStatus()))
     else
         minimizer = fill(NaN, length(Theta))
         minimum = NaN
-        opt_ret = :Default
+        opt_ret = SciMLBase.ReturnCode.Default
     end
     return SciMLBase.build_solution(cache,
                                     cache.opt,
@@ -240,9 +240,7 @@ After successive application the resulting expression should only contain terms 
 Also mutates the given expression in-place, however incorrectly!
 """
 function simplify_and_expand!(expr::Expr) # looks awful but this is actually much faster than `Metatheory.jl`
-    if expr.head == :call && all(isa.(expr.args[2:end], Number)) # func(a::Number...)
-        return eval(expr)
-    elseif expr.head == :call && length(expr.args) == 3
+    if expr.head == :call && length(expr.args) == 3
         if expr.args[1] == :(*) && expr.args[2] isa Number && expr.args[3] isa Number # a::Number * b::Number => a * b
             return expr.args[2] * expr.args[3]
         elseif expr.args[1] == :(+) && expr.args[2] isa Number && expr.args[3] isa Number # a::Number + b::Number => a + b
@@ -305,6 +303,8 @@ function simplify_and_expand!(expr::Expr) # looks awful but this is actually muc
                         Expr(:call, :*, expr.args[3], expr.args[2].args[2]),
                         Expr(:call, :*, expr.args[3], expr.args[2].args[3]))
         end
+    elseif expr.head == :call && all(isa.(expr.args[2:end], Number)) # func(a::Number...)
+        return eval(expr)
     end
     for i in 1:length(expr.args)
         expr.args[i] = simplify_and_expand!(expr.args[i])
