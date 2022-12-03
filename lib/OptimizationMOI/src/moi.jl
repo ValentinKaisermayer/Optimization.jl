@@ -158,13 +158,11 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
             MOI.ObjectiveSense(),
             cache.sense === Optimization.MaxSense ? MOI.MAX_SENSE : MOI.MIN_SENSE)
 
-    prob_dim = length(cache.u0) + (isnothing(cache.p) ? 0 : length(cache.p)) # estimate of the expression complexity
-
     if !isnothing(cache.cons_expr)
         for cons_expr in cache.cons_expr
             expr = _replace_parameter_indices!(deepcopy(cons_expr.args[2]), # f(x) == 0 or f(x) <= 0
                                                cache.p)
-            expr = fixpoint_simplify_and_expand!(expr; iter_max = prob_dim^2)
+            expr = fixpoint_simplify_and_expand!(expr)
             func, c = try
                 get_moi_function(expr) # find: f(x) + c == 0 or f(x) + c <= 0
             catch e
@@ -186,7 +184,7 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
 
     # objective
     expr = _replace_parameter_indices!(deepcopy(cache.expr), cache.p)
-    expr = fixpoint_simplify_and_expand!(expr; iter_max = prob_dim^2)
+    expr = fixpoint_simplify_and_expand!(expr)
     func, c = try
         get_moi_function(expr)
     catch e
@@ -252,22 +250,6 @@ function simplify_and_expand!(expr::Expr) # looks awful but this is actually muc
             return expr.args[2] / expr.args[3]
         elseif expr.args[1] == :(//) && expr.args[2] isa Number && expr.args[3] isa Number  # a::Number//b::Number => a/b
             return expr.args[2] / expr.args[3]
-        elseif expr.args[1] == :(*) && expr.args[2] isa Number && isa(expr.args[3], Expr) &&
-               expr.args[3].head == :call && expr.args[3].args[1] == :(*) &&
-               expr.args[3].args[2] isa Number # a::Number * (b::Number * c) => (a * b) * c
-            return Expr(:call, :*, expr.args[2] * expr.args[3].args[2],
-                        expr.args[3].args[3])
-        elseif expr.args[1] == :(+) && isa(expr.args[3], Expr) &&
-               isa(expr.args[2], Number) &&
-               expr.args[3].head == :call && expr.args[3].args[1] == :(+) &&
-               isa(expr.args[3].args[2], Number) # a::Number + (b::Number + x)  => (a+b) + x
-            return Expr(:call, :+, expr.args[2] + expr.args[3].args[2],
-                        expr.args[3].args[3])
-        elseif expr.args[1] == :(*) && isa(expr.args[3], Expr) &&
-               expr.args[3].head == :call && expr.args[3].args[1] == :(*) &&
-               isa(expr.args[3].args[2], Number) # x * (a::Number * y) => a * (x * y)
-            return Expr(:call, :*, expr.args[3].args[2],
-                        Expr(:call, :*, expr.args[2], expr.args[3].args[3]))
         elseif expr.args[1] == :(*) && isa(expr.args[2], Real) && isone(expr.args[2]) # 1 * x => x
             return expr.args[3]
         elseif expr.args[1] == :(*) && isa(expr.args[3], Real) && isone(expr.args[3]) # x * 1 => x
@@ -303,6 +285,22 @@ function simplify_and_expand!(expr::Expr) # looks awful but this is actually muc
             return Expr(:call, :+,
                         Expr(:call, :*, expr.args[3], expr.args[2].args[2]),
                         Expr(:call, :*, expr.args[3], expr.args[2].args[3]))
+        elseif expr.args[1] == :(*) && expr.args[2] isa Number && isa(expr.args[3], Expr) &&
+            expr.args[3].head == :call && expr.args[3].args[1] == :(*) &&
+            expr.args[3].args[2] isa Number # a::Number * (b::Number * c) => (a * b) * c
+            return Expr(:call, :*, expr.args[2] * expr.args[3].args[2],
+                        expr.args[3].args[3])
+        elseif expr.args[1] == :(+) && isa(expr.args[3], Expr) &&
+            isa(expr.args[2], Number) &&
+            expr.args[3].head == :call && expr.args[3].args[1] == :(+) &&
+            isa(expr.args[3].args[2], Number) # a::Number + (b::Number + x)  => (a+b) + x
+            return Expr(:call, :+, expr.args[2] + expr.args[3].args[2],
+                        expr.args[3].args[3])
+        elseif expr.args[1] == :(*) && isa(expr.args[3], Expr) &&
+            expr.args[3].head == :call && expr.args[3].args[1] == :(*) &&
+            isa(expr.args[3].args[2], Number) # x * (a::Number * y) => a * (x * y)
+            return Expr(:call, :*, expr.args[3].args[2],
+                        Expr(:call, :*, expr.args[2], expr.args[3].args[3]))   
         end
     elseif expr.head == :call && all(isa.(expr.args[2:end], Number)) # func(a::Number...)
         return eval(expr)
@@ -317,7 +315,7 @@ end
 Simplifies the given expression until a fixed-point is reached and the expression no longer changes.
 Will not terminate if a cycle occurs!
 """
-function fixpoint_simplify_and_expand!(expr; iter_max = Inf)
+function fixpoint_simplify_and_expand!(expr; iter_max = typemax(Int)-1)
     i = 0
     iter_max >= 0 || throw(ArgumentError("Expected `iter_max` to be positive."))
     while i <= iter_max
@@ -350,9 +348,10 @@ function collect_moi_terms!(expr::Expr, affine_terms, quadratic_terms, constant)
                           MOI.ScalarQuadraticTerm(factor * Float64(expr.args[2]),
                                                   x1, x2))
                 elseif expr.args[3].head == :ref # a::Number * x[i] 
-                    push!(affine_terms,
-                          MOI.ScalarAffineTerm(Float64(expr.args[2]),
-                                               _get_variable_index_from_expr(expr.args[3])))
+                    x = _get_variable_index_from_expr(expr.args[3])
+                    push!(affine_terms, MOI.ScalarAffineTerm(Float64(expr.args[2]), x))
+                else
+                    throw(MalformedExprException("$expr"))
                 end
             elseif isa(expr.args[2], Number) && isa(expr.args[3], Number) # a::Number * b::Number
                 constant[] += expr.args[2] * expr.args[3]
@@ -380,11 +379,14 @@ function collect_moi_terms!(expr::Expr, affine_terms, quadratic_terms, constant)
     elseif expr.head == :ref # x[i]
         expr.args[1] == :x || throw(MalformedExprException("$expr"))
         push!(affine_terms, MOI.ScalarAffineTerm(1.0, MOI.VariableIndex(expr.args[2])))
+    else
+        throw(MalformedExprException("$expr"))
     end
 
     return
 end
 
+_get_variable_index_from_expr(expr::T) where {T} = throw(MalformedExprException("$expr"))
 function _get_variable_index_from_expr(expr::Expr)
     _is_var_ref_expr(expr)
     return MOI.VariableIndex(expr.args[2])
