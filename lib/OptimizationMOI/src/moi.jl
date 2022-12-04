@@ -450,6 +450,7 @@ function rep_pars_vals!(expr::Expr, expr_map)
         end
     end
     Threads.@sync for i in eachindex(expr.args)
+        i == 1 && expr.head == :call && continue # first arg is the operator
         Threads.@spawn expr.args[i] = rep_pars_vals!(expr.args[i], expr_map)
     end
     return expr
@@ -495,7 +496,7 @@ parameters with `x[i]` and `p[i]`.
 - `sys`: Reference to the system holding the parameters and states
 - `expand_expr=false`: If `true` the symbolic expression is expanded first.
 """
-function convert_to_expr(eq, sys; expand_expr = false, expr_map = expr_map(sys))
+function convert_to_expr(eq, sys; expand_expr = false, expr_map = get_expr_map(sys))
     if expand_expr
         eq = try
             Symbolics.expand(eq) # PolyForm sometimes errors
@@ -504,7 +505,7 @@ function convert_to_expr(eq, sys; expand_expr = false, expr_map = expr_map(sys))
         end
     end
     expr = ModelingToolkit.toexpr(eq)
-    rep_pars_vals!(expr, expr_map)
-    symbolify!(expr)
+    expr = rep_pars_vals!(expr, expr_map)
+    expr = symbolify!(expr)
     return expr
 end
