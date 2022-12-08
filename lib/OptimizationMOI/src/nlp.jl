@@ -353,10 +353,12 @@ function _add_moi_variables!(opt_setup, evaluator::MOIOptimizationNLPEvaluator)
     num_variables = length(evaluator.u0)
     θ = MOI.add_variables(opt_setup, num_variables)
     if evaluator.lb !== nothing
-        @assert eachindex(evaluator.lb) == Base.OneTo(num_variables)
+        eachindex(evaluator.lb) == Base.OneTo(num_variables) ||
+            throw(ArgumentError("Expected `cache.lb` to be of the same length as the number of variables."))
     end
     if evaluator.ub !== nothing
-        @assert eachindex(evaluator.ub) == Base.OneTo(num_variables)
+        eachindex(evaluator.ub) == Base.OneTo(num_variables) ||
+            throw(ArgumentError("Expected `cache.ub` to be of the same length as the number of variables."))
     end
 
     for i in 1:num_variables
@@ -378,7 +380,8 @@ function _add_moi_variables!(opt_setup, evaluator::MOIOptimizationNLPEvaluator)
     end
 
     if MOI.supports(opt_setup, MOI.VariablePrimalStart(), MOI.VariableIndex)
-        @assert eachindex(evaluator.u0) == Base.OneTo(num_variables)
+        eachindex(evaluator.u0) == Base.OneTo(num_variables) ||
+            throw(ArgumentError("Expected `cache.u0` to be of the same length as the number of variables."))
         for i in 1:num_variables
             MOI.set(opt_setup, MOI.VariablePrimalStart(), θ[i], evaluator.u0[i])
         end
@@ -401,11 +404,11 @@ function SciMLBase.__solve(cache::MOIOptimizationNLPCache)
     MOI.set(opt_setup,
             MOI.ObjectiveSense(),
             cache.evaluator.sense === Optimization.MaxSense ? MOI.MAX_SENSE : MOI.MIN_SENSE)
-    if cache.evaluator.lcons === nothing
-        @assert cache.evaluator.ucons === nothing
+    xor(isnothing(cache.evaluator.lcons), isnothing(cache.evaluator.ucons)) &&
+        throw(ArgumentError("Expected `cache.evaluator.lcons` and `cache.evaluator.lcons` to be supplied both or none."))
+    if isnothing(cache.evaluator.lcons) && isnothing(cache.evaluator.ucons)
         con_bounds = MOI.NLPBoundsPair[]
     else
-        @assert cache.evaluator.ucons !== nothing
         con_bounds = MOI.NLPBoundsPair.(Float64.(cache.evaluator.lcons),
                                         Float64.(cache.evaluator.ucons))
     end

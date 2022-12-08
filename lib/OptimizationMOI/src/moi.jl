@@ -110,10 +110,12 @@ function _add_moi_variables!(opt_setup, cache::MOIOptimizationCache)
     num_variables = length(cache.u0)
     θ = MOI.add_variables(opt_setup, num_variables)
     if cache.lb !== nothing
-        @assert eachindex(cache.lb) == Base.OneTo(num_variables)
+        eachindex(cache.lb) == Base.OneTo(num_variables) ||
+            throw(ArgumentError("Expected `cache.lb` to be of the same length as the number of variables."))
     end
     if cache.ub !== nothing
-        @assert eachindex(cache.ub) == Base.OneTo(num_variables)
+        eachindex(cache.ub) == Base.OneTo(num_variables) ||
+            throw(ArgumentError("Expected `cache.ub` to be of the same length as the number of variables."))
     end
 
     for i in 1:num_variables
@@ -134,7 +136,8 @@ function _add_moi_variables!(opt_setup, cache::MOIOptimizationCache)
     end
 
     if MOI.supports(opt_setup, MOI.VariablePrimalStart(), MOI.VariableIndex)
-        @assert eachindex(cache.u0) == Base.OneTo(num_variables)
+        eachindex(cache.u0) == Base.OneTo(num_variables) ||
+            throw(ArgumentError("Expected `cache.u0` to be of the same length as the number of variables."))
         for i in 1:num_variables
             MOI.set(opt_setup, MOI.VariablePrimalStart(), θ[i], Float64(cache.u0[i]))
         end
