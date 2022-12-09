@@ -152,12 +152,9 @@ end
 
     cons(res, x, p) = (res .= [x[1]^2 + x[2]^2, x[1] * x[2]])
 
-    optprob = OptimizationFunction(rosenbrock, Optimization.AutoZygote(), cons = cons)
-    prob = OptimizationProblem(optprob, x0, _p, lcons = [-Inf, -1.0], ucons = [0.8, 2.0])
-    sol = solve(prob, Ipopt.Optimizer())
-
     optprob = OptimizationFunction(rosenbrock, Optimization.AutoModelingToolkit(),
                                    cons = cons)
     prob = OptimizationProblem(optprob, x0, _p, lcons = [1.0, 0.5], ucons = [1.0, 0.5])
     sol = solve(prob, AmplNLWriter.Optimizer(Ipopt_jll.amplexe))
+    sol = solve(prob, HiGHS.Optimizer())
 end
