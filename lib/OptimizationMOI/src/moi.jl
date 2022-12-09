@@ -161,6 +161,7 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
             MOI.ObjectiveSense(),
             cache.sense === Optimization.MaxSense ? MOI.MAX_SENSE : MOI.MIN_SENSE)
 
+    c_index = MOI.ConstraintIndex[]
     if !isnothing(cache.cons_expr)
         for cons_expr in cache.cons_expr
             expr = _replace_parameter_indices!(deepcopy(cons_expr.args[2]), # f(x) == 0 or f(x) <= 0
@@ -176,9 +177,11 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
                 end
             end
             if is_eq(cons_expr)
-                MOI.add_constraint(opt_setup, func, MOI.EqualTo(Float64(-c)))
+                push!(c_index,
+                      MOI.add_constraint(opt_setup, func, MOI.EqualTo(Float64(-c))))
             elseif is_leq(cons_expr)
-                MOI.add_constraint(opt_setup, func, MOI.LessThan(Float64(-c)))
+                push!(c_index,
+                      MOI.add_constraint(opt_setup, func, MOI.LessThan(Float64(-c))))
             else
                 throw(MalformedExprException("$expr"))
             end
@@ -213,7 +216,7 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
                                     cache.opt,
                                     minimizer,
                                     minimum;
-                                    original = opt_setup,
+                                    original = (opt_setup = opt_setup, c_index = c_index),
                                     retcode = opt_ret)
 end
 
