@@ -347,6 +347,7 @@ function fixpoint_simplify_and_expand!(expr; iter_max = typemax(Int) - 1)
 end
 
 function collect_moi_terms!(expr::Real, affine_terms, quadratic_terms, constant)
+    (isnan(expr) || isinf(expr)) && throw(MalformedExprException("$expr"))
     constant[] += expr
 end
 
@@ -358,31 +359,35 @@ function collect_moi_terms!(expr::Expr, affine_terms, quadratic_terms, constant)
                 collect_moi_terms!(expr.args[i], affine_terms, quadratic_terms, constant)
             end
         elseif expr.args[1] == :(*)
-            if expr.args[2] isa Number && isa(expr.args[3], Expr)
+            if isa(expr.args[2], Number) && isa(expr.args[3], Expr)
                 if expr.args[3].head == :call && expr.args[3].args[1] == :(*) # a::Number * (x[i] * x[j])
                     x1 = _get_variable_index_from_expr(expr.args[3].args[2])
                     x2 = _get_variable_index_from_expr(expr.args[3].args[3])
                     factor = x1 == x2 ? 2.0 : 1.0
-                    push!(quadratic_terms,
-                          MOI.ScalarQuadraticTerm(factor * Float64(expr.args[2]),
-                                                  x1, x2))
+                    c = factor * Float64(expr.args[2])
+                    (isnan(c) || isinf(c)) && throw(MalformedExprException("$expr"))
+                    push!(quadratic_terms, MOI.ScalarQuadraticTerm(c, x1, x2))
                 elseif expr.args[3].head == :ref # a::Number * x[i] 
                     x = _get_variable_index_from_expr(expr.args[3])
-                    push!(affine_terms, MOI.ScalarAffineTerm(Float64(expr.args[2]), x))
+                    c = Float64(expr.args[2])
+                    (isnan(c) || isinf(c)) && throw(MalformedExprException("$expr"))
+                    push!(affine_terms, MOI.ScalarAffineTerm(c, x))
                 else
                     throw(MalformedExprException("$expr"))
                 end
             elseif isa(expr.args[2], Number) && isa(expr.args[3], Number) # a::Number * b::Number
-                constant[] += expr.args[2] * expr.args[3]
+                c = expr.args[2] * expr.args[3]
+                (isnan(c) || isinf(c)) && throw(MalformedExprException("$expr"))
+                constant[] += c
             elseif isa(expr.args[2], Expr) && isa(expr.args[3], Expr)
                 if expr.args[2].head == :call && expr.args[2].args[1] == :(*) &&
-                   expr.args[2].args[2] isa Number # (a::Number * x[i]) * x[j]
+                   isa(expr.args[2].args[2], Number) # (a::Number * x[i]) * x[j]
                     x1 = _get_variable_index_from_expr(expr.args[2].args[3])
                     x2 = _get_variable_index_from_expr(expr.args[3])
                     factor = x1 == x2 ? 2.0 : 1.0
-                    push!(quadratic_terms,
-                          MOI.ScalarQuadraticTerm(factor * Float64(expr.args[2].args[2]),
-                                                  x1, x2))
+                    c = factor * Float64(expr.args[2].args[2])
+                    (isnan(c) || isinf(c)) && throw(MalformedExprException("$expr"))
+                    push!(quadratic_terms, MOI.ScalarQuadraticTerm(c, x1, x2))
                 else # x[i] * x[j]
                     x1 = _get_variable_index_from_expr(expr.args[2])
                     x2 = _get_variable_index_from_expr(expr.args[3])

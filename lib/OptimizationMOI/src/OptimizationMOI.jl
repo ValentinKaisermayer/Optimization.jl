@@ -92,7 +92,10 @@ Replaces every expression `:p[i]` with its numeric value from `p`
 _replace_parameter_indices!(expr, p) = expr
 function _replace_parameter_indices!(expr::Expr, p)
     if expr.head == :ref && expr.args[1] == :p
-        return p[expr.args[2]]
+        p_ = p[expr.args[2]]
+        (!isa(p_, Real) || isnan(p_) || isinf(p_)) &&
+            throw(ArgumentError("Expected parameters to be real valued: $(expr.args[2]) => $p_"))
+        return p_
     end
     for i in 1:length(expr.args)
         expr.args[i] = _replace_parameter_indices!(expr.args[i], p)
