@@ -202,7 +202,9 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
     end
     MOI.set(opt_setup, MOI.ObjectiveFunction{typeof(func)}(), func)
 
+    t0 = time()
     MOI.optimize!(opt_setup)
+    t1 = time()
     if MOI.get(opt_setup, MOI.ResultCount()) >= 1
         minimizer = MOI.get(opt_setup, MOI.VariablePrimal(), Theta)
         minimum = MOI.get(opt_setup, MOI.ObjectiveValue())
@@ -217,7 +219,8 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
                                     minimizer,
                                     minimum;
                                     original = (opt_setup = opt_setup, c_index = c_index),
-                                    retcode = opt_ret)
+                                    retcode = opt_ret,
+                                    solve_time = t1 - t0)
 end
 
 function get_moi_function(expr)
