@@ -208,12 +208,11 @@ function SciMLBase.__solve(cache::MOIOptimizationCache)
     if MOI.get(opt_setup, MOI.ResultCount()) >= 1
         minimizer = MOI.get(opt_setup, MOI.VariablePrimal(), Theta)
         minimum = MOI.get(opt_setup, MOI.ObjectiveValue())
-        opt_ret = __moi_status_to_ReturnCode(MOI.get(opt_setup, MOI.TerminationStatus()))
     else
         minimizer = fill(NaN, length(Theta))
         minimum = NaN
-        opt_ret = SciMLBase.ReturnCode.Default
     end
+    opt_ret = __moi_status_to_ReturnCode(MOI.get(opt_setup, MOI.TerminationStatus()))
     return SciMLBase.build_solution(cache,
                                     cache.opt,
                                     minimizer,
