@@ -20,7 +20,7 @@ function _test_sparse_derivatives_hs071(backend, optimizer)
                                lcons = [25.0, 40.0],
                                ucons = [Inf, 40.0])
     sol = solve(prob, optimizer)
-    @test isapprox(sol.minimum, 17.014017145179164; atol = 1e-6)
+    @test isapprox(sol.objective, 17.014017145179164; atol = 1e-6)
     x = [1.0, 4.7429996418092970, 3.8211499817883077, 1.3794082897556983]
     @test isapprox(sol.minimizer, x; atol = 1e-6)
     @test prod(sol.minimizer) >= 25.0 - 1e-6
@@ -38,7 +38,7 @@ end
     prob = OptimizationProblem(optprob, x0, _p; sense = Optimization.MaxSense)
 
     sol = solve(prob, Ipopt.Optimizer())
-    @test 10 * sol.minimum < l1
+    @test 10 * sol.objective < l1
 
     # cache interface
     cache = init(prob, Ipopt.Optimizer())
@@ -50,31 +50,31 @@ end
 
     opt = Ipopt.Optimizer()
     sol = solve(prob, opt)
-    @test 10 * sol.minimum < l1
+    @test 10 * sol.objective < l1
     sol = solve(prob, opt) #test reuse of optimizer
-    @test 10 * sol.minimum < l1
+    @test 10 * sol.objective < l1
 
     sol = solve(prob,
                 OptimizationMOI.MOI.OptimizerWithAttributes(Ipopt.Optimizer,
                                                             "max_cpu_time" => 60.0))
-    @test 10 * sol.minimum < l1
+    @test 10 * sol.objective < l1
 
     sol = solve(prob,
                 OptimizationMOI.MOI.OptimizerWithAttributes(NLopt.Optimizer,
                                                             "algorithm" => :LN_BOBYQA))
-    @test 10 * sol.minimum < l1
+    @test 10 * sol.objective < l1
 
     sol = solve(prob,
                 OptimizationMOI.MOI.OptimizerWithAttributes(NLopt.Optimizer,
                                                             "algorithm" => :LD_LBFGS))
-    @test 10 * sol.minimum < l1
+    @test 10 * sol.objective < l1
 
     opt = OptimizationMOI.MOI.OptimizerWithAttributes(NLopt.Optimizer,
                                                       "algorithm" => :LD_LBFGS)
     sol = solve(prob, opt)
-    @test 10 * sol.minimum < l1
+    @test 10 * sol.objective < l1
     sol = solve(prob, opt)
-    @test 10 * sol.minimum < l1
+    @test 10 * sol.objective < l1
 
     cons_circ = (res, x, p) -> res .= [x[1]^2 + x[2]^2]
     optprob = OptimizationFunction(rosenbrock, Optimization.AutoModelingToolkit(true, true);
@@ -82,12 +82,12 @@ end
     prob = OptimizationProblem(optprob, x0, _p, ucons = [Inf], lcons = [0.0])
 
     sol = solve(prob, Ipopt.Optimizer())
-    @test 10 * sol.minimum < l1
+    @test 10 * sol.objective < l1
 
     sol = solve(prob,
                 OptimizationMOI.MOI.OptimizerWithAttributes(Ipopt.Optimizer,
                                                             "max_cpu_time" => 60.0))
-    @test 10 * sol.minimum < l1
+    @test 10 * sol.objective < l1
 end
 
 @testset "backends" begin
@@ -156,5 +156,4 @@ end
                                    cons = cons)
     prob = OptimizationProblem(optprob, x0, _p, lcons = [1.0, 0.5], ucons = [1.0, 0.5])
     sol = solve(prob, AmplNLWriter.Optimizer(Ipopt_jll.amplexe))
-    sol = solve(prob, HiGHS.Optimizer())
 end

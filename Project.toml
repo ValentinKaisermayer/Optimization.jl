@@ -1,6 +1,6 @@
 name = "Optimization"
 uuid = "7f7a1694-90dd-40f0-9382-eb1efda571ba"
-version = "3.9.4"
+version = "3.11.0"
 
 [deps]
 ArrayInterfaceCore = "30b0a656-2188-435a-8636-2ec0e6a096e2"
@@ -26,7 +26,7 @@ LoggingExtras = "0.4, 0.5, 1"
 ProgressLogging = "0.1"
 Reexport = "0.2, 1.0"
 Requires = "1.0"
-SciMLBase = "1.67"
+SciMLBase = "1.79.0"
 TerminalLoggers = "0.1"
 julia = "1.6"
 
