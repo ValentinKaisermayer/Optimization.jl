@@ -122,55 +122,28 @@ function MOIOptimizationNLPCache(prob::OptimizationProblem, opt; kwargs...)
 end
 
 SciMLBase.has_reinit(cache::MOIOptimizationNLPCache) = true
-function SciMLBase.reinit!(cache::MOIOptimizationNLPCache; p = nothing, u0 = nothing)
-    if !isnothing(p) && eltype(p) <: Pair || (!isnothing(u0) && eltype(u0) <: Pair)
-        defs = Dict{Any, Any}()
-        if hasproperty(cache.f, :sys)
-            if hasfield(typeof(cache.f.sys), :ps)
-                defs = mergedefaults(defs, cache.p, parameters(cache.f.sys))
-            end
-            if hasfield(typeof(cache.f.sys), :states)
-                defs = SciMLBase.mergedefaults(defs, cache.u0, states(cache.f.sys))
-            end
+function SciMLBase.reinit!(cache::MOIOptimizationNLPCache; p = missing, u0 = missing)
+    if p === missing && u0 === missing
+        p, u0 = cache.p, cache.u0
+    else # at least one of them has a value
+        if p === missing
+            p = cache.p
         end
-    else
-        defs = nothing
-    end
-
-    if isnothing(p)
-        p = cache.p
-    else
-        if eltype(p) <: Pair
-            if hasproperty(cache.f, :sys) && hasfield(typeof(cache.f.sys), :ps)
-                p = varmap_to_vars(p, parameters(cache.f.sys);
-                                   defaults = defs)
-                defs = mergedefaults(defs, p, parameters(cache.f.sys))
-            else
-                throw(ArgumentError("This problem does not support symbolic parameter maps with `reinit!`, i.e. it does not have a symbolic origin. Please use `reinit!` with the `p` keyword argument as a vector of values, paying attention to parameter order."))
-            end
+        if u0 === missing
+            u0 = cache.u0
+        end
+        if (eltype(p) <: Pair && !isempty(p)) || (eltype(u0) <: Pair && !isempty(u0)) # one is a non-empty symbolic map
+            hasproperty(cache.f, :sys) && hasfield(typeof(cache.f.sys), :ps) ||
+                throw(ArgumentError("This cache does not support symbolic maps with `remake`, i.e. it does not have a symbolic origin." *
+                                    " Please use `remake` with the `p` keyword argument as a vector of values, paying attention to parameter order."))
+            hasproperty(cache.f, :sys) && hasfield(typeof(cache.f.sys), :states) ||
+                throw(ArgumentError("This cache does not support symbolic maps with `remake`, i.e. it does not have a symbolic origin." *
+                                    " Please use `remake` with the `u0` keyword argument as a vector of values, paying attention to state order."))
+            p, u0 = SciMLBase.process_p_u0_symbolic(cache, p, u0)
         end
     end
 
-    length(cache.p) == length(p) ||
-        error("Something went wrong! The new parameter vector does not match the old one.")
     cache.p = p
-
-    if isnothing(u0)
-        u0 = cache.u0
-    else
-        if eltype(u0) <: Pair
-            if hasproperty(cache.f, :sys) && hasfield(typeof(cache.f.sys), :states)
-                u0 = varmap_to_vars(u0, states(cache.f.sys);
-                                    defaults = defs)
-                defs = mergedefaults(defs, u0, states(cache.f.sys))
-            else
-                throw(ArgumentError("This problem does not support symbolic state maps with `reinit!`, i.e. it does not have a symbolic origin. Please use `reinit!` with the `u0` keyword argument as a vector of values, paying attention to state order."))
-            end
-        end
-    end
-
-    length(cache.u0) == length(u0) ||
-        error("Something went wrong! The new state vector does not match the old one.")
     cache.u0 = u0
 
     return cache
